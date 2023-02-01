@@ -29,6 +29,7 @@ class MarkerCropper:
         return cv2.aruco.drawDetectedMarkers(color_image, self.corners, self.ids)
 
     def try_crop_images_to_markers(self, color_image, depth_image):
+        # TODO we could crop according to 4 markers, but may not be needed
         if len(self.corners) >= 2:
             x1, y1 = self.corners[0][0][0].astype(int)
             x2, y2 = self.corners[1][0][0].astype(int)
