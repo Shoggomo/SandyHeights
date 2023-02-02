@@ -3,29 +3,26 @@ import time
 import pyrealsense2 as rs
 import numpy as np
 import cv2
+import config
 
-from BlackPixelRemover import BlackPixelRemover
-from ImageAverager import ImageAverager
-from MarkerCropper import MarkerCropper
+from BlackPixelFilter import BlackPixelFilter
+from AverageImageFilter import AverageImageFilter
+from MarkerCropFilter import MarkerCropFilter
 
-PRINT_DEFAULT_CONFIG = False
-ONLY_SHOW_MARKERS = False
-CROP_IMAGE = False
+marker_crop_filter = MarkerCropFilter()
+average_image_filter = AverageImageFilter()
+black_pixel_filter = BlackPixelFilter()
 
-marker_cropper = MarkerCropper()
-image_averager = ImageAverager()
-black_pixel_remover = BlackPixelRemover()
-
-if ONLY_SHOW_MARKERS:
-    marker_cropper.show_markers_and_exit()
+if config.ONLY_SHOW_MARKERS:
+    marker_crop_filter.show_markers_and_exit()
 
 # Configure depth and color streams
 pipeline = rs.pipeline()
-config = rs.config()
+device_config = rs.config()
 
 # Get device product line for setting a supporting resolution
 pipeline_wrapper = rs.pipeline_wrapper(pipeline)
-pipeline_profile = config.resolve(pipeline_wrapper)
+pipeline_profile = device_config.resolve(pipeline_wrapper)
 device = pipeline_profile.get_device()
 device_product_line = str(device.get_info(rs.camera_info.product_line))
 advnc_mode = rs.rs400_advanced_mode(device)
@@ -43,7 +40,7 @@ while not advnc_mode.is_enabled():
     print("Advanced mode is", "enabled" if advnc_mode.is_enabled() else "disabled")
 
 # print default config
-if PRINT_DEFAULT_CONFIG:
+if config.PRINT_DEFAULT_CONFIG:
     serialized_string = advnc_mode.serialize_json()
     print("Default config: \n", serialized_string)
 
@@ -52,17 +49,36 @@ with open("controls_config.json", "r") as f:
     json_string = str(json.load(f)).replace("'", '\"')
     advnc_mode.load_json(json_string)
 
-config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 15)
-config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 15)
+device_config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 15)
+device_config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 15)
 
 # Start streaming
-profile = pipeline.start(config)
+profile = pipeline.start(device_config)
 
-# Create an align object
-# rs.align allows us to perform alignment of depth frames to others frames
-# The "align_to" is the stream type to which we plan to align depth frames.
-align_to = rs.stream.color
-align = rs.align(align_to)
+# setup filters
+threshold_filter = rs.threshold_filter()
+disparity_filter = rs.disparity_transform(config.APPLY_DISPARITY_FILTER)
+color_filter = rs.colorizer()
+align = rs.align(rs.stream.color)
+
+# configure filters
+# threshold_filter.set_option(rs.option.min_distance, config.SANDBOX_TOP_DISTANCE)
+# threshold_filter.set_option(rs.option.max_distance, config.SANDBOX_TOP_DISTANCE + config.SANDBOX_HEIGHT)
+
+# color_filter.set_option(rs.option.histogram_equalization_enabled, True)
+# color_filter.set_option(rs.option.color_scheme, 9)
+# color_filter.set_option(rs.option.visual_preset, 1)
+# color_filter.set_option(rs.option.min_distance, config.SANDBOX_TOP_DISTANCE)
+# color_filter.set_option(rs.option.max_distance, config.SANDBOX_TOP_DISTANCE + config.SANDBOX_HEIGHT)
+# print(color_filter.get_option(rs.option.min_distance))
+
+# sensor = device.query_sensors()[0]
+# print(sensor.get_supported_options())
+# sensor.set_option(rs.option.min_distance, 0)
+
+# TODO add self calibration here
+# TODO add other filters. See viewer
+# TODO remove blackpixelfilter, use builtin hole filling filter
 
 # Streaming loop
 try:
@@ -74,36 +90,43 @@ try:
         aligned_frames = align.process(frames)
 
         # Get aligned frames
-        aligned_depth_frame = aligned_frames.get_depth_frame()
-        color_frame = aligned_frames.get_color_frame()
+        depth_image = aligned_frames.get_depth_frame()
+        color_image = aligned_frames.get_color_frame()
 
         # Validate that both frames are valid
-        if not aligned_depth_frame or not color_frame:
+        if not depth_image or not color_image:
             continue
 
-        # depth_image = np.asanyarray(aligned_depth_frame.get_data())
-        color_image = np.asanyarray(color_frame.get_data())
+        # apply realsense filters
+        depth_image = threshold_filter.process(depth_image)
+        depth_image = disparity_filter.process(depth_image)
+        depth_image = color_filter.colorize(depth_image).get_data()
 
-        # colorize depth image
-        colorizer = rs.colorizer(0)  # 0 is Jet color scheme
-        depth_colormap = np.asanyarray(colorizer.colorize(aligned_depth_frame).get_data())
+        # turn images into numpy arrays
+        color_image = np.asanyarray(color_image.get_data())
+        depth_image = np.asanyarray(depth_image)
 
-        # try to remove black pixels
-        depth_colormap = black_pixel_remover.remove_from_image(depth_colormap)
+        # remove flickering black areas
+        # depth_image = black_pixel_filter.remove_from_image(depth_image)
 
         # average images (do this before crop. resolution of images must be equal)
-        image_averager.add_image(depth_colormap)
-        depth_colormap = image_averager.get_averaged_image()
+        average_image_filter.add_image(depth_image)
+        depth_image = average_image_filter.get_averaged_image()
 
-        # detect and draw aruco markers or crop images
-        if marker_cropper.should_detect():
-            marker_cropper.detect_markers(color_image)
-        if CROP_IMAGE:
-            color_image, depth_colormap = marker_cropper.try_crop_images_to_markers(color_image, depth_colormap)
+        # detect and draw aruco markers or crop images via markers
+        if marker_crop_filter.should_detect():
+            marker_crop_filter.detect_markers(color_image)
+
+        if config.CROP_IMAGE:
+            color_image, depth_image = marker_crop_filter.try_crop_images_to_markers(color_image, depth_image)
         else:
-            color_image = marker_cropper.draw_detected_markers(color_image)
+            color_image = marker_crop_filter.draw_detected_markers(color_image)
 
-        images = np.hstack((color_image, depth_colormap))
+        # scale images up again
+        color_image = cv2.resize(color_image, dsize=config.SCALED_IMAGE_RESOLUTION, interpolation=cv2.INTER_LANCZOS4)
+        depth_image = cv2.resize(depth_image, dsize=config.SCALED_IMAGE_RESOLUTION, interpolation=cv2.INTER_LANCZOS4)
+
+        images = np.hstack((color_image, depth_image))
 
         cv2.namedWindow('Align Example', cv2.WINDOW_NORMAL)
         cv2.imshow('Align Example', images)

@@ -6,7 +6,7 @@ import cv2
 UPDATE_THRESHOLD = 2 * 1e+9  # = 2 seconds
 
 
-class MarkerCropper:
+class MarkerCropFilter:
 
     def __init__(self):
         self.ids = []

@@ -2,17 +2,17 @@ from typing import List
 
 import numpy as np
 
-AVERAGE_WINDOW_SIZE = 10
+import config
 
 
-class ImageAverager:
+class AverageImageFilter:
     images: List[np.ndarray]
 
     def __init__(self):
         self.images = []
 
     def add_image(self, image):
-        if len(self.images) >= AVERAGE_WINDOW_SIZE:
+        if len(self.images) >= config.AVERAGE_WINDOW_SIZE:
             self.images.pop(0)
 
         self.images.append(image)
